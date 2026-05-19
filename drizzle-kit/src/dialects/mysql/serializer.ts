@@ -1,5 +1,5 @@
-import type { CheckHandlerResult } from 'src/cli/commands/check';
-import { humanLog, mysqlSchemaError } from 'src/cli/views';
+import type { CheckHandlerResult } from '../../cli/commands/check';
+import { humanLog, mysqlSchemaError } from '../../cli/views';
 import { assertUnreachable } from '../../utils';
 import { findLeafSnapshotIds } from '../../utils/utils-node';
 import type { MysqlDDL, SchemaError } from './ddl';

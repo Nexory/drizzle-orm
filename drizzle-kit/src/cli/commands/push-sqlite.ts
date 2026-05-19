@@ -1,12 +1,12 @@
 import chalk from 'chalk';
 import { render } from 'hanji';
-import { extractSqliteExisting } from 'src/dialects/drizzle';
-import { prepareEntityFilter } from 'src/dialects/pull-utils';
-import type { Column, Table } from 'src/dialects/sqlite/ddl';
-import { interimToDDL } from 'src/dialects/sqlite/ddl';
-import { ddlDiff } from 'src/dialects/sqlite/diff';
-import { fromDrizzleSchema, prepareFromSchemaFiles } from 'src/dialects/sqlite/drizzle';
-import type { JsonStatement } from 'src/dialects/sqlite/statements';
+import { extractSqliteExisting } from '../../dialects/drizzle';
+import { prepareEntityFilter } from '../../dialects/pull-utils';
+import type { Column, Table } from '../../dialects/sqlite/ddl';
+import { interimToDDL } from '../../dialects/sqlite/ddl';
+import { ddlDiff } from '../../dialects/sqlite/diff';
+import { fromDrizzleSchema, prepareFromSchemaFiles } from '../../dialects/sqlite/drizzle';
+import type { JsonStatement } from '../../dialects/sqlite/statements';
 import type { SQLiteClient } from '../../utils';
 import { isJsonMode } from '../context';
 import { CommandOutputCliError } from '../errors';
@@ -16,14 +16,7 @@ import { resolver } from '../prompts';
 import { Select } from '../selector-ui';
 import type { EntitiesFilterConfig } from '../validations/cli';
 import type { SqliteCredentials } from '../validations/sqlite';
-import {
-	explain as explainView,
-	explainJsonOutput,
-	humanLog,
-	printJsonOutput,
-	ProgressView,
-	sqliteSchemaError,
-} from '../views';
+import { explain as explainView, explainJsonOutput, humanLog, ProgressView, sqliteSchemaError } from '../views';
 
 export const handle = async (
 	db: SQLiteClient,
@@ -74,34 +67,31 @@ export const handle = async (
 	);
 
 	if (hints.hasMissingHints()) {
-		hints.emitAndExit();
+		return hints.toResponse();
 	}
 
 	if (sqlStatements.length === 0) {
-		if (json) {
-			printJsonOutput({ status: 'no_changes', dialect });
-		} else {
+		if (!json) {
 			render(`\n[${chalk.blue('i')}] No changes detected`);
 		}
-		return;
+		return { status: 'no_changes' as const, dialect };
 	}
 
 	const suggestionHints = await suggestions(db, statements, hints);
 
 	if (hints.hasMissingHints()) {
-		hints.emitAndExit();
+		return hints.toResponse();
 	}
 
 	if (explain) {
 		if (json) {
-			printJsonOutput(explainJsonOutput(dialect, statements, suggestionHints));
-		} else {
-			const explainMessage = explainView('sqlite', groupedStatements, suggestionHints);
-			if (explainMessage) {
-				humanLog(explainMessage);
-			}
+			return explainJsonOutput(dialect, statements, suggestionHints);
 		}
-		return;
+		const explainMessage = explainView('sqlite', groupedStatements, suggestionHints);
+		if (explainMessage) {
+			humanLog(explainMessage);
+		}
+		return { status: 'ok' as const, dialect };
 	}
 
 	if (!force && !json && suggestionHints.length > 0) {
@@ -124,11 +114,10 @@ export const handle = async (
 	// | Changing the foreign_keys setting affects the execution of all statements prepared using the database connection, including those prepared before the setting was changed.
 	await db.batch(allStatements);
 
-	if (json) {
-		printJsonOutput({ status: 'ok', dialect });
-	} else {
+	if (!json) {
 		render(`[${chalk.green('\u2713')}] Changes applied`);
 	}
+	return { status: 'ok' as const, dialect };
 };
 
 export const suggestions = async (

@@ -1,4 +1,4 @@
-import { humanLog, mssqlSchemaError } from 'src/cli/views';
+import { humanLog, mssqlSchemaError } from '../../cli/views';
 import { findLeafSnapshotIds } from '../../utils/utils-node';
 import type { MssqlDDL } from './ddl';
 import { createDDL, interimToDDL } from './ddl';

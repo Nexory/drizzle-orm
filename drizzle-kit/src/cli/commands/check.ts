@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { readFileSync } from 'fs';
-import { getCommutativityDialect } from 'src/commutativity';
-import type { MigrationNode, NonCommutativityReport, UnifiedBranchConflict } from 'src/commutativity/types';
+import { getCommutativityDialect } from '../../commutativity';
+import type { MigrationNode, NonCommutativityReport, UnifiedBranchConflict } from '../../commutativity/types';
 import type { Dialect } from '../../utils/schemaValidator';
 import { prepareOutFolder, validatorForDialect } from '../../utils/utils-node';
 import { CheckCliError } from '../errors';

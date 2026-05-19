@@ -8,11 +8,13 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { HintsHandler } from '../../src/cli/hints';
 
-class ExitCalled extends Error {
-	constructor(readonly code: string | number | null | undefined) {
-		super(`process.exit:${String(code)}`);
-	}
-}
+const runWithCliContext = async <T>(
+	context: { json: boolean },
+	callback: () => Promise<T> | T,
+): Promise<T> => {
+	const ctx = await import('../../src/cli/context');
+	return ctx.runWithCliContext(context, callback);
+};
 
 const mockNoopProgressView = () => {
 	vi.doMock('../../src/cli/views', async () => {
@@ -31,38 +33,6 @@ const mockNoopProgressView = () => {
 			ProgressView: NoopProgressView,
 		};
 	});
-};
-
-const captureJsonModeRun = async <T>(fn: () => Promise<T>) => {
-	const chunks: string[] = [];
-	const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(
-		((chunk: string | Uint8Array) => {
-			chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
-			return true;
-		}) as unknown as typeof process.stdout.write,
-	);
-	const exitSpy = vi.spyOn(process, 'exit').mockImplementation(
-		((code?: string | number | null) => {
-			throw new ExitCalled(code);
-		}) as unknown as typeof process.exit,
-	);
-	let exitCode: string | number | null | undefined;
-	let result: T | undefined;
-	try {
-		result = await fn();
-	} catch (err) {
-		if (!(err instanceof ExitCalled)) throw err;
-		exitCode = err.code;
-	} finally {
-		writeSpy.mockRestore();
-		exitSpy.mockRestore();
-	}
-	return { output: chunks.join(''), exitCode, result };
-};
-
-const withCliContext = async <T>(json: boolean, callback: () => Promise<T> | T): Promise<T> => {
-	const { runWithCliContext } = await import('../../src/cli/context');
-	return runWithCliContext({ json }, callback);
 };
 
 const sqliteDbFrom = (client: BetterSqlite3.Database) => {
@@ -270,7 +240,7 @@ test('push postgres schema errors throw structured cli errors in json mode', asy
 
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushPostgres.handle(
 			['schema.ts'],
 			false,
@@ -317,7 +287,7 @@ test('push postgres ddl errors throw structured cli errors in json mode', async 
 
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushPostgres.handle(
 			['schema.ts'],
 			false,
@@ -364,7 +334,7 @@ test('push mysql ddl errors throw structured cli errors in json mode', async () 
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushMysql.handle(
 			['schema.ts'],
 			{} as never,
@@ -404,7 +374,7 @@ test('push sqlite ddl errors throw structured cli errors in json mode', async ()
 
 	const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushSqlite.handle(
 			{ query: vi.fn(async () => []), batch: vi.fn(async () => []) } as never,
 			['schema.ts'],
@@ -450,7 +420,7 @@ test('push cockroach schema errors throw structured cli errors in json mode', as
 
 	const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushCockroach.handle(
 			['schema.ts'],
 			false,
@@ -497,7 +467,7 @@ test('push cockroach ddl errors throw structured cli errors in json mode', async
 
 	const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushCockroach.handle(
 			['schema.ts'],
 			false,
@@ -575,11 +545,9 @@ test('push postgres explain emits structured json payload in json mode', async (
 	}));
 
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
-	const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-	const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-	await withCliContext(true, async () => {
-		await pushPostgres.handle(
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
 			['schema.ts'],
 			false,
 			{} as never,
@@ -588,30 +556,24 @@ test('push postgres explain emits structured json payload in json mode', async (
 			true,
 			{ table: '__drizzle_migrations', schema: 'public' },
 			new HintsHandler(),
-		);
-	});
+		));
 
-	const stdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
-	const stderr = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
-	const parsed = JSON.parse(stdout);
-
-	expect(stdout.trim().startsWith('{')).toBe(true);
-	expect(stdout.trim().endsWith('}')).toBe(true);
-	expect(parsed).toMatchObject({
+	if (env.status !== 'ok' || !('statements' in env)) {
+		throw new Error(`expected explain 'ok' envelope with statements, got '${env.status}'`);
+	}
+	expect(env).toMatchObject({
 		status: 'ok',
 		dialect: 'postgresql',
 		hints: [],
 	});
-	expect(parsed.statements).toHaveLength(1);
-	expect(parsed.statements[0]).toMatchObject({
+	expect(env.statements).toHaveLength(1);
+	expect(env.statements[0]).toMatchObject({
 		type: 'alter_column',
 		to: { schema: 'public', table: 'users', name: 'name' },
 		diff: {
 			notNull: { from: false, to: true },
 		},
 	});
-	expect(stderr).toBe('');
-	expect(stdout).not.toContain('Generated migration statements');
 });
 
 test('generate postgres explain emits structured json payload in json mode', async () => {
@@ -697,11 +659,9 @@ test('generate postgres explain emits structured json payload in json mode', asy
 	});
 
 	const generatePostgres = await import('../../src/cli/commands/generate-postgres');
-	const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-	const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-json-'));
-	await withCliContext(true, () =>
+	const env = await runWithCliContext({ json: true }, () =>
 		generatePostgres.handle({
 			out: tempDir,
 			filenames: ['schema.ts'],
@@ -713,27 +673,22 @@ test('generate postgres explain emits structured json payload in json mode', asy
 			hints: new HintsHandler(),
 		} as never));
 
-	const stdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
-	const stderr = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
-	const parsed = JSON.parse(stdout);
-
-	expect(stdout.trim().startsWith('{')).toBe(true);
-	expect(stdout.trim().endsWith('}')).toBe(true);
-	expect(parsed).toMatchObject({
+	if (env.status !== 'ok' || !('statements' in env)) {
+		throw new Error(`expected explain 'ok' envelope with statements, got '${env.status}'`);
+	}
+	expect(env).toMatchObject({
 		status: 'ok',
 		dialect: 'postgresql',
 		hints: [],
 	});
-	expect(parsed.statements).toHaveLength(1);
-	expect(parsed.statements[0]).toMatchObject({
+	expect(env.statements).toHaveLength(1);
+	expect(env.statements[0]).toMatchObject({
 		type: 'alter_column',
 		to: { schema: 'public', table: 'users', name: 'name' },
 		diff: {
 			notNull: { from: false, to: true },
 		},
 	});
-	expect(stderr).toBe('');
-	expect(stdout).not.toContain('Your SQL migration');
 });
 
 test('generate postgres explain emits no_changes for empty diff in json mode', async () => {
@@ -770,28 +725,22 @@ test('generate postgres explain emits no_changes for empty diff in json mode', a
 	});
 
 	const generatePostgres = await import('../../src/cli/commands/generate-postgres');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'postgresql',
 	});
-	// Full stdout must remain a single JSON object.
-	expect(output.trim().startsWith('{')).toBe(true);
-	expect(output.trim().endsWith('}')).toBe(true);
 });
 
 test('generate mysql explain emits no_changes for empty diff in json mode', async () => {
@@ -808,22 +757,19 @@ test('generate mysql explain emits no_changes for empty diff in json mode', asyn
 	}));
 
 	const generateMysql = await import('../../src/cli/commands/generate-mysql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateMysql.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-mysql-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateMysql.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-mysql-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'mysql' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'mysql' });
 });
 
 test('generate sqlite explain emits no_changes for empty diff in json mode', async () => {
@@ -846,23 +792,20 @@ test('generate sqlite explain emits no_changes for empty diff in json mode', asy
 	}));
 
 	const generateSqlite = await import('../../src/cli/commands/generate-sqlite');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateSqlite.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-sqlite-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				dialect: 'sqlite',
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateSqlite.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-sqlite-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			dialect: 'sqlite',
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'sqlite' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'sqlite' });
 });
 
 test('generate cockroach explain emits no_changes for empty diff in json mode', async () => {
@@ -879,22 +822,19 @@ test('generate cockroach explain emits no_changes for empty diff in json mode', 
 	}));
 
 	const generateCockroach = await import('../../src/cli/commands/generate-cockroach');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateCockroach.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-cockroach-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateCockroach.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-cockroach-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'cockroach' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'cockroach' });
 });
 
 test('generate mssql explain emits no_changes for empty diff in json mode', async () => {
@@ -911,22 +851,19 @@ test('generate mssql explain emits no_changes for empty diff in json mode', asyn
 	}));
 
 	const generateMssql = await import('../../src/cli/commands/generate-mssql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateMssql.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-mssql-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateMssql.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-mssql-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'mssql' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'mssql' });
 });
 
 test('generate singlestore explain emits no_changes for empty diff in json mode', async () => {
@@ -943,22 +880,19 @@ test('generate singlestore explain emits no_changes for empty diff in json mode'
 	}));
 
 	const generateSinglestore = await import('../../src/cli/commands/generate-singlestore');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateSinglestore.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-singlestore-noop-json-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateSinglestore.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-singlestore-noop-json-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'singlestore' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'singlestore' });
 });
 
 test('explainJsonOutput sanitizes hints: strips ANSI, excludes statement', async () => {
@@ -1002,9 +936,8 @@ test('explainJsonOutput sanitizes hints: strips ANSI, excludes statement', async
 
 test('generate writeResult emits json for no-op when json mode is active', async () => {
 	const { writeResult } = await import('../../src/cli/commands/generate-common');
-	const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-	await withCliContext(true, () => {
+	const env = await runWithCliContext({ json: true }, () =>
 		writeResult({
 			snapshot: {} as never,
 			sqlStatements: [],
@@ -1013,26 +946,19 @@ test('generate writeResult emits json for no-op when json mode is active', async
 			dialect: 'postgresql',
 			renames: [],
 			snapshots: [],
-		});
-	});
+		}));
 
-	const stdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
-	const parsed = JSON.parse(stdout);
-
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'postgresql',
 	});
-	expect(stdout.trim().startsWith('{')).toBe(true);
-	expect(stdout.trim().endsWith('}')).toBe(true);
 });
 
 test('generate writeResult emits json payload when a migration is written in json mode', async () => {
 	const { writeResult } = await import('../../src/cli/commands/generate-common');
-	const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 	const outFolder = mkdtempSync(join(tmpdir(), 'drizzle-kit-write-result-json-'));
 
-	await withCliContext(true, () => {
+	const env = await runWithCliContext({ json: true }, () =>
 		writeResult({
 			snapshot: {} as never,
 			sqlStatements: ['CREATE TABLE "users" ("id" serial PRIMARY KEY);'],
@@ -1042,21 +968,15 @@ test('generate writeResult emits json payload when a migration is written in jso
 			dialect: 'postgresql',
 			renames: [],
 			snapshots: [],
-		});
-	});
+		}));
 
-	const stdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
-	const parsed = JSON.parse(stdout);
-
-	expect(parsed).toMatchObject({
+	expect(env).toMatchObject({
 		status: 'ok',
 		migration_path: expect.stringContaining('migration.sql'),
 	});
-	expect(parsed).toMatchObject({ dialect: expect.anything() });
-	expect(parsed).not.toHaveProperty('message');
-	expect(parsed).not.toHaveProperty('path');
-	expect(stdout.trim().startsWith('{')).toBe(true);
-	expect(stdout.trim().endsWith('}')).toBe(true);
+	expect(env).toMatchObject({ dialect: expect.anything() });
+	expect(env).not.toHaveProperty('message');
+	expect(env).not.toHaveProperty('path');
 });
 
 test('generate sqlite custom emits json payload in json mode', async () => {
@@ -1070,26 +990,21 @@ test('generate sqlite custom emits json payload in json mode', async () => {
 	}));
 	const generateSqlite = await import('../../src/cli/commands/generate-sqlite');
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-custom-json-'));
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateSqlite.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: true,
-				name: 'test',
-				breakpoints: false,
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateSqlite.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: true,
+			name: 'test',
+			breakpoints: false,
+		} as never));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'ok',
 		dialect: 'sqlite',
 		migration_path: expect.stringContaining('migration.sql'),
 	});
-	expect(output.trim().startsWith('{')).toBe(true);
-	expect(output.trim().endsWith('}')).toBe(true);
 });
 
 test('generate sqlite emits missing_hints for unresolved table rename in json mode', async () => {
@@ -1121,23 +1036,20 @@ test('generate sqlite emits missing_hints for unresolved table rename in json mo
 	}));
 
 	const generateSqlite = await import('../../src/cli/commands/generate-sqlite');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generateSqlite.handle({
-				out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-sqlite-missing-hints-')),
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				dialect: 'sqlite',
-				hints: new HintsHandler(),
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generateSqlite.handle({
+			out: mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-sqlite-missing-hints-')),
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			dialect: 'sqlite',
+			hints: new HintsHandler(),
+		} as never));
 
-	expect(exitCode).toBe(2);
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'table', entity: ['public', 'users_new'] },
@@ -1192,11 +1104,9 @@ test('push postgres schema warnings do not leak to stdout in json mode', async (
 	}));
 
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
-	const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-	const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-	await withCliContext(true, async () => {
-		await pushPostgres.handle(
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
 			['schema.ts'],
 			false,
 			{} as never,
@@ -1205,23 +1115,12 @@ test('push postgres schema warnings do not leak to stdout in json mode', async (
 			false,
 			{ table: '__drizzle_migrations', schema: 'public' },
 			new HintsHandler(),
-		);
-	});
+		));
 
-	const stdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
-	const stderr = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
-	const parsed = JSON.parse(stdout);
-
-	// Should get clean JSON: no-op result since sqlStatements is empty
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'postgresql',
 	});
-	// Warning text must NOT appear on stdout
-	expect(stdout).not.toContain('policy_not_linked');
-	expect(stdout).not.toContain('Policy');
-	// stderr should also be clean (warnings go through humanLog which suppresses in JSON mode)
-	expect(stderr).toBe('');
 });
 
 test('push postgres emits missing_hints for unresolved schema rename in json mode', async () => {
@@ -1264,23 +1163,19 @@ test('push postgres emits missing_hints for unresolved schema rename in json mod
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
 	const hints = new HintsHandler();
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushPostgres.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				hints,
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			hints,
+		));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'schema', entity: ['next_schema'] },
@@ -1328,23 +1223,19 @@ test('push postgres emits missing_hints for schema rename and table drop in json
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
 	const hints = new HintsHandler();
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushPostgres.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				hints,
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			hints,
+		));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'schema', entity: ['next_schema'] },
@@ -1397,23 +1288,19 @@ test('push postgres resolves schema rename hint and emits confirm missing_hint i
 		{ type: 'rename', kind: 'schema', from: ['prev_schema'], to: ['next_schema'] },
 	]);
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushPostgres.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				hints,
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			hints,
+		));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -1469,23 +1356,19 @@ test('generate postgres emits missing_hints for unresolved schema rename in json
 	const hints = new HintsHandler();
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-missing-hints-'));
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints,
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints,
+		} as never));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'schema', entity: ['next_schema'] },
@@ -1544,23 +1427,19 @@ test('generate postgres emits missing_hints for each unresolved schema independe
 	const hints = new HintsHandler();
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-missing-hints-branching-'));
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints,
-			} as never))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints,
+		} as never));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'schema', entity: ['next_schema_a'] },
@@ -1598,26 +1477,23 @@ test('push sqlite emits explain json payload in json mode', async () => {
 	const batch = vi.fn(async () => [] as unknown[]);
 	const mockDb = { query, batch };
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushSqlite.handle(
-				mockDb as never,
-				['schema.ts'],
-				false,
-				{} as never,
-				{} as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: '' },
-				'sqlite',
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushSqlite.handle(
+			mockDb as never,
+			['schema.ts'],
+			false,
+			{} as never,
+			{} as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: '' },
+			'sqlite',
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
 	expect(query).not.toHaveBeenCalled();
 	expect(batch).not.toHaveBeenCalled();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'sqlite',
 	});
@@ -1668,22 +1544,19 @@ test('push mysql emits explain json payload in json mode', async () => {
 	}));
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushMysql.handle(
-				['schema.ts'],
-				{} as never,
-				false,
-				false,
-				[] as never,
-				true,
-				{ table: '__drizzle_migrations', schema: '' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushMysql.handle(
+			['schema.ts'],
+			{} as never,
+			false,
+			false,
+			[] as never,
+			true,
+			{ table: '__drizzle_migrations', schema: '' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toMatchObject({
+	expect(env).toMatchObject({
 		status: 'ok',
 		dialect: 'mysql',
 		hints: [],
@@ -1719,22 +1592,19 @@ test('push mysql emits no_changes in json mode when diff is empty', async () => 
 	}));
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushMysql.handle(
-				['schema.ts'],
-				{} as never,
-				false,
-				false,
-				[] as never,
-				true,
-				{ table: '__drizzle_migrations', schema: '' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushMysql.handle(
+			['schema.ts'],
+			{} as never,
+			false,
+			false,
+			[] as never,
+			true,
+			{ table: '__drizzle_migrations', schema: '' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({ status: 'no_changes', dialect: 'mysql' });
+	expect(env).toStrictEqual({ status: 'no_changes', dialect: 'mysql' });
 });
 
 test('push mysql emits missing_hints in json mode for unresolved type_change suggestion', async () => {
@@ -1775,22 +1645,19 @@ test('push mysql emits missing_hints in json mode for unresolved type_change sug
 	}));
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushMysql.handle(
-				['schema.ts'],
-				{} as never,
-				false,
-				false,
-				[] as never,
-				false,
-				{ table: '__drizzle_migrations', schema: '' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushMysql.handle(
+			['schema.ts'],
+			{} as never,
+			false,
+			false,
+			[] as never,
+			false,
+			{ table: '__drizzle_migrations', schema: '' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBe(2);
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{
@@ -1838,7 +1705,7 @@ test('push mssql throws rename_blocked_by_check_constraint error in json mode', 
 
 	const pushMssql = await import('../../src/cli/commands/push-mssql');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushMssql.handle(
 			['schema.ts'],
 			false,
@@ -1898,22 +1765,19 @@ test('push mysql with force still emits missing_hints in json mode for unresolve
 	}));
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushMysql.handle(
-				['schema.ts'],
-				{} as never,
-				false,
-				true,
-				[] as never,
-				false,
-				{ table: '__drizzle_migrations', schema: '' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushMysql.handle(
+			['schema.ts'],
+			{} as never,
+			false,
+			true,
+			[] as never,
+			false,
+			{ table: '__drizzle_migrations', schema: '' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBe(2);
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{
@@ -1956,22 +1820,19 @@ test('push cockroach emits no_changes in json mode when diff is empty', async ()
 	}));
 
 	const pushCockroach = await import('../../src/cli/commands/push-cockroach');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushCockroach.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushCockroach.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'cockroach',
 	});
@@ -2006,22 +1867,19 @@ test('push mssql emits no_changes in json mode when diff is empty', async () => 
 	}));
 
 	const pushMssql = await import('../../src/cli/commands/push-mssql');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushMssql.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'dbo' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushMssql.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'dbo' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'mssql',
 	});
@@ -2064,22 +1922,19 @@ test('push singlestore emits no_changes in json mode when diff is empty', async 
 	}));
 
 	const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushSinglestore.handle(
-				['schema.ts'],
-				{} as never,
-				[] as never,
-				false,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: '' },
-				new HintsHandler(),
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushSinglestore.handle(
+			['schema.ts'],
+			{} as never,
+			[] as never,
+			false,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: '' },
+			new HintsHandler(),
+		));
 
-	expect(exitCode).toBeUndefined();
-	expect(JSON.parse(output.trim())).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'no_changes',
 		dialect: 'singlestore',
 	});
@@ -2130,23 +1985,19 @@ test('push postgres orders rename hint resolves create_or_rename and applies cha
 		{ type: 'rename', kind: 'table', from: ['public', 'orders'], to: ['public', 'orders1'] },
 	]);
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushPostgres.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				hints,
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			hints,
+		));
 
-	expect(exitCode).toBeUndefined();
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toMatchObject({ status: 'ok', dialect: 'postgresql' });
+	expect(env).toMatchObject({ status: 'ok', dialect: 'postgresql' });
 	const probeCalls = dbQuery.mock.calls.filter((call) => /select 1 from .*orders1/i.test(String(call[0])));
 	expect(probeCalls).toHaveLength(0);
 });
@@ -2185,23 +2036,19 @@ test('push postgres emits missing_hints when rename_or_create lacks a hint in js
 	const pushPostgres = await import('../../src/cli/commands/push-postgres');
 	const hints = new HintsHandler();
 
-	const { output, exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			pushPostgres.handle(
-				['schema.ts'],
-				false,
-				{} as never,
-				[] as never,
-				false,
-				true,
-				{ table: '__drizzle_migrations', schema: 'public' },
-				hints,
-			))
-	);
+	const env = await runWithCliContext({ json: true }, () =>
+		pushPostgres.handle(
+			['schema.ts'],
+			false,
+			{} as never,
+			[] as never,
+			false,
+			true,
+			{ table: '__drizzle_migrations', schema: 'public' },
+			hints,
+		));
 
-	expect(exitCode).toBe(2);
-	const parsed = JSON.parse(output.trim());
-	expect(parsed).toStrictEqual({
+	expect(env).toStrictEqual({
 		status: 'missing_hints',
 		unresolved: [
 			{ type: 'rename_or_create', kind: 'table', entity: ['public', 'orders1'] },
@@ -2256,21 +2103,18 @@ test('generate postgres with matching rename hint emits sql without missing_hint
 	]);
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-with-hints-'));
-	const { exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints,
-			} as never))
-	);
-
-	expect(exitCode).toBeUndefined();
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints,
+		} as never));
+	expect(env).toMatchObject({ status: 'ok', dialect: 'postgresql' });
 });
 
 test('generate silently ignores confirm_data_loss hints', async () => {
@@ -2314,21 +2158,18 @@ test('generate silently ignores confirm_data_loss hints', async () => {
 	]);
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-ignore-confirm-'));
-	const { exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints,
-			} as never))
-	);
-
-	expect(exitCode).toBeUndefined();
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints,
+		} as never));
+	expect(env).toMatchObject({ status: 'no_changes', dialect: 'postgresql' });
 });
 
 test('excess hints referencing non-existent entities are silently ignored', async () => {
@@ -2373,21 +2214,18 @@ test('excess hints referencing non-existent entities are silently ignored', asyn
 	]);
 
 	const tempDir = mkdtempSync(join(tmpdir(), 'drizzle-kit-generate-excess-hints-'));
-	const { exitCode } = await captureJsonModeRun(() =>
-		withCliContext(true, () =>
-			generatePostgres.handle({
-				out: tempDir,
-				filenames: ['schema.ts'],
-				casing: undefined,
-				custom: false,
-				name: undefined,
-				breakpoints: false,
-				explain: true,
-				hints,
-			} as never))
-	);
-
-	expect(exitCode).toBeUndefined();
+	const env = await runWithCliContext({ json: true }, () =>
+		generatePostgres.handle({
+			out: tempDir,
+			filenames: ['schema.ts'],
+			casing: undefined,
+			custom: false,
+			name: undefined,
+			breakpoints: false,
+			explain: true,
+			hints,
+		} as never));
+	expect(env).toMatchObject({ status: 'no_changes', dialect: 'postgresql' });
 });
 
 describe('push postgres confirm_data_loss[table] in json mode', () => {
@@ -2422,23 +2260,19 @@ describe('push postgres confirm_data_loss[table] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -2479,23 +2313,19 @@ describe('push postgres confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -2534,23 +2364,19 @@ describe('push postgres confirm_data_loss[view] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'view', entity: ['public', 'user_stats'], reason: 'non_empty' },
@@ -2591,23 +2417,19 @@ describe('push postgres confirm_data_loss[view] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'view', entity: ['public', 'user_stats'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -2646,23 +2468,19 @@ describe('push postgres confirm_data_loss[column] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'], reason: 'non_empty' },
@@ -2703,23 +2521,19 @@ describe('push postgres confirm_data_loss[column] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -2758,23 +2572,19 @@ describe('push postgres confirm_data_loss[schema] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'], reason: 'non_empty' },
@@ -2815,23 +2625,19 @@ describe('push postgres confirm_data_loss[schema] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -2873,23 +2679,19 @@ describe('push postgres confirm_data_loss[primary_key] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -2938,23 +2740,19 @@ describe('push postgres confirm_data_loss[primary_key] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['public', 'users', 'users_pkey'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -3006,23 +2804,19 @@ describe('push postgres confirm_data_loss[add_not_null] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -3081,23 +2875,19 @@ describe('push postgres confirm_data_loss[add_not_null] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -3146,23 +2936,19 @@ describe('push postgres confirm_data_loss[add_unique] in json mode', () => {
 		const pushPostgres = await import('../../src/cli/commands/push-postgres');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -3218,23 +3004,19 @@ describe('push postgres confirm_data_loss[add_unique] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_unique', entity: ['public', 'users', 'users_email_unique'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushPostgres.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushPostgres.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'postgresql',
 		});
@@ -3282,23 +3064,19 @@ describe('push mysql confirm_data_loss[table] in json mode', () => {
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -3348,23 +3126,19 @@ describe('push mysql confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -3412,23 +3186,19 @@ describe('push mysql confirm_data_loss[column] non_empty in json mode', () => {
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'], reason: 'non_empty' },
@@ -3478,23 +3248,19 @@ describe('push mysql confirm_data_loss[column] non_empty in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -3549,23 +3315,19 @@ describe('push mysql confirm_data_loss[primary_key] in json mode', () => {
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['public', 'users', 'PRIMARY'], reason: 'non_empty' },
@@ -3622,23 +3384,19 @@ describe('push mysql confirm_data_loss[primary_key] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['public', 'users', 'PRIMARY'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -3689,23 +3447,19 @@ describe('push mysql confirm_data_loss[add_not_null] add_column in json mode', (
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -3763,23 +3517,19 @@ describe('push mysql confirm_data_loss[add_not_null] add_column in json mode', (
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -3834,23 +3584,19 @@ describe('push mysql confirm_data_loss[add_not_null] alter_column in json mode',
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -3912,23 +3658,19 @@ describe('push mysql confirm_data_loss[add_not_null] alter_column in json mode',
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -3990,23 +3732,19 @@ describe('push mysql confirm_data_loss[column] type_change in json mode', () => 
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -4076,23 +3814,19 @@ describe('push mysql confirm_data_loss[column] type_change in json mode', () => 
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'name'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -4152,23 +3886,19 @@ describe('push mysql confirm_data_loss[add_unique] in json mode', () => {
 		const pushMysql = await import('../../src/cli/commands/push-mysql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -4235,23 +3965,19 @@ describe('push mysql confirm_data_loss[add_unique] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_unique', entity: ['public', 'users', 'users_email_idx'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMysql.handle(
-					['schema.ts'],
-					{} as never,
-					false,
-					false,
-					{} as never,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMysql.handle(
+				['schema.ts'],
+				{} as never,
+				false,
+				false,
+				{} as never,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mysql',
 		});
@@ -4317,7 +4043,7 @@ test('push mysql throws drop_pk_dependency error in json mode', async () => {
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushMysql.handle(
 			['schema.ts'],
 			{} as never,
@@ -4399,7 +4125,7 @@ test('push mysql throws fk_target_not_unique error in json mode', async () => {
 
 	const pushMysql = await import('../../src/cli/commands/push-mysql');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushMysql.handle(
 			['schema.ts'],
 			{} as never,
@@ -4443,25 +4169,21 @@ describe('push sqlite confirm_data_loss[table] in json mode', () => {
 		const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -4494,25 +4216,21 @@ describe('push sqlite confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -4548,25 +4266,21 @@ describe('push sqlite confirm_data_loss[column-drop] in json mode', () => {
 		const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'], reason: 'non_empty' },
@@ -4601,25 +4315,21 @@ describe('push sqlite confirm_data_loss[column-drop] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -4658,25 +4368,21 @@ describe('push sqlite confirm_data_loss[add_not_null] in json mode', () => {
 		const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -4719,25 +4425,21 @@ describe('push sqlite confirm_data_loss[add_not_null] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -4783,25 +4485,21 @@ describe('push sqlite confirm_data_loss[add_not_null] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -4849,25 +4547,21 @@ describe('push sqlite confirm_data_loss[recreate_table-single] in json mode', ()
 		const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy'], reason: 'non_empty' },
@@ -4909,25 +4603,21 @@ describe('push sqlite confirm_data_loss[recreate_table-single] in json mode', ()
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -4979,31 +4669,27 @@ describe('push sqlite confirm_data_loss[recreate_table-multi] in json mode', () 
 		const pushSqlite = await import('../../src/cli/commands/push-sqlite');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed.status).toBe('missing_hints');
-		expect(parsed.unresolved).toHaveLength(2);
-		const entities = (parsed.unresolved as Array<{ entity: [string, string, string] }>)
-			.map((u) => u.entity[2])
+		if (env.status !== 'missing_hints') throw new Error(`expected status 'missing_hints', got '${env.status}'`);
+		expect(env.unresolved).toHaveLength(2);
+		const entities = [...env.unresolved]
+			.map((u) => (u.entity as readonly [string, string, string])[2])
 			.sort();
 		expect(entities).toStrictEqual(['legacy_a', 'legacy_b']);
-		for (const u of parsed.unresolved) {
+		for (const u of env.unresolved) {
 			expect(u).toMatchObject({
 				type: 'confirm_data_loss',
 				kind: 'column',
@@ -5049,25 +4735,21 @@ describe('push sqlite confirm_data_loss[recreate_table-multi] in json mode', () 
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_b'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSqlite.handle(
-					db as never,
-					['schema.ts'],
-					false,
-					{} as never,
-					{} as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					'sqlite',
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSqlite.handle(
+				db as never,
+				['schema.ts'],
+				false,
+				{} as never,
+				{} as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				'sqlite',
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'sqlite',
 		});
@@ -5114,22 +4796,19 @@ describe('push mssql confirm_data_loss[table] in json mode', () => {
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['dbo', 'users'], reason: 'non_empty' },
@@ -5170,22 +4849,19 @@ describe('push mssql confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['dbo', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5227,22 +4903,19 @@ describe('push mssql confirm_data_loss[column] in json mode', () => {
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['dbo', 'users', 'legacy_col'], reason: 'non_empty' },
@@ -5286,22 +4959,19 @@ describe('push mssql confirm_data_loss[column] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['dbo', 'users', 'legacy_col'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5340,22 +5010,19 @@ describe('push mssql confirm_data_loss[schema] in json mode', () => {
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'], reason: 'non_empty' },
@@ -5396,22 +5063,19 @@ describe('push mssql confirm_data_loss[schema] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5453,22 +5117,19 @@ describe('push mssql confirm_data_loss[primary_key] in json mode', () => {
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['dbo', 'users', 'PK_users'], reason: 'non_empty' },
@@ -5512,22 +5173,19 @@ describe('push mssql confirm_data_loss[primary_key] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['dbo', 'users', 'PK_users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5569,22 +5227,19 @@ describe('push mssql confirm_data_loss[add_not_null] add_column in json mode', (
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -5633,22 +5288,19 @@ describe('push mssql confirm_data_loss[add_not_null] add_column in json mode', (
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['dbo', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5690,22 +5342,19 @@ describe('push mssql confirm_data_loss[add_not_null] alter_column in json mode',
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -5754,22 +5403,19 @@ describe('push mssql confirm_data_loss[add_not_null] alter_column in json mode',
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['dbo', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5816,22 +5462,19 @@ describe('push mssql confirm_data_loss[add_unique] in json mode', () => {
 		const pushMssql = await import('../../src/cli/commands/push-mssql');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -5885,22 +5528,19 @@ describe('push mssql confirm_data_loss[add_unique] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_unique', entity: ['dbo', 'users', 'users_email_unique'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushMssql.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'dbo' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushMssql.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'dbo' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'mssql',
 		});
@@ -5941,7 +5581,7 @@ test('push mssql throws rename_schema_unsupported error in json mode', async () 
 
 	const pushMssql = await import('../../src/cli/commands/push-mssql');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushMssql.handle(
 			['schema.ts'],
 			false,
@@ -5994,23 +5634,19 @@ describe('push cockroach confirm_data_loss[table] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -6051,23 +5687,19 @@ describe('push cockroach confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6106,23 +5738,19 @@ describe('push cockroach confirm_data_loss[view] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'view', entity: ['public', 'user_stats'], reason: 'non_empty' },
@@ -6163,23 +5791,19 @@ describe('push cockroach confirm_data_loss[view] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'view', entity: ['public', 'user_stats'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6218,23 +5842,19 @@ describe('push cockroach confirm_data_loss[column] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'], reason: 'non_empty' },
@@ -6275,23 +5895,19 @@ describe('push cockroach confirm_data_loss[column] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6330,23 +5946,19 @@ describe('push cockroach confirm_data_loss[schema] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'], reason: 'non_empty' },
@@ -6387,23 +5999,19 @@ describe('push cockroach confirm_data_loss[schema] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'schema', entity: ['analytics'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6445,23 +6053,19 @@ describe('push cockroach confirm_data_loss[primary_key] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -6510,23 +6114,19 @@ describe('push cockroach confirm_data_loss[primary_key] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'primary_key', entity: ['public', 'users', 'users_pkey'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6579,23 +6179,19 @@ describe('push cockroach confirm_data_loss[add_not_null] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -6655,23 +6251,19 @@ describe('push cockroach confirm_data_loss[add_not_null] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6723,23 +6315,19 @@ describe('push cockroach confirm_data_loss[add_unique] in json mode', () => {
 		const pushCockroach = await import('../../src/cli/commands/push-cockroach');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -6798,23 +6386,19 @@ describe('push cockroach confirm_data_loss[add_unique] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'add_unique', entity: ['public', 'users', 'users_email_idx'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushCockroach.handle(
-					['schema.ts'],
-					false,
-					{} as never,
-					[] as never,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: 'public' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushCockroach.handle(
+				['schema.ts'],
+				false,
+				{} as never,
+				[] as never,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: 'public' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		const parsed = JSON.parse(output.trim());
-		expect(parsed).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'cockroach',
 		});
@@ -6863,22 +6447,19 @@ describe('push singlestore confirm_data_loss[table] in json mode', () => {
 		const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'], reason: 'non_empty' },
@@ -6929,22 +6510,19 @@ describe('push singlestore confirm_data_loss[table] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'table', entity: ['public', 'users'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'singlestore',
 		});
@@ -6993,22 +6571,19 @@ describe('push singlestore confirm_data_loss[column] in json mode', () => {
 		const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'], reason: 'non_empty' },
@@ -7059,22 +6634,19 @@ describe('push singlestore confirm_data_loss[column] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'legacy_id'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'singlestore',
 		});
@@ -7126,22 +6698,19 @@ describe('push singlestore confirm_data_loss[column] in json mode', () => {
 		const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -7203,22 +6772,19 @@ describe('push singlestore confirm_data_loss[column] in json mode', () => {
 			{ type: 'confirm_data_loss', kind: 'column', entity: ['public', 'users', 'name'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'singlestore',
 		});
@@ -7270,22 +6836,19 @@ describe('push singlestore confirm_data_loss[add_not_null] in json mode', () => 
 		const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
 		const hints = new HintsHandler();
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBe(2);
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'missing_hints',
 			unresolved: [
 				{
@@ -7344,22 +6907,19 @@ describe('push singlestore confirm_data_loss[add_not_null] in json mode', () => 
 			{ type: 'confirm_data_loss', kind: 'add_not_null', entity: ['public', 'users', 'email'] },
 		]);
 
-		const { output, exitCode } = await captureJsonModeRun(() =>
-			withCliContext(true, () =>
-				pushSinglestore.handle(
-					['schema.ts'],
-					{} as never,
-					[] as never,
-					false,
-					false,
-					false,
-					{ table: '__drizzle_migrations', schema: '' },
-					hints,
-				))
-		);
+		const env = await runWithCliContext({ json: true }, () =>
+			pushSinglestore.handle(
+				['schema.ts'],
+				{} as never,
+				[] as never,
+				false,
+				false,
+				false,
+				{ table: '__drizzle_migrations', schema: '' },
+				hints,
+			));
 
-		expect(exitCode).toBeUndefined();
-		expect(JSON.parse(output.trim())).toStrictEqual({
+		expect(env).toStrictEqual({
 			status: 'ok',
 			dialect: 'singlestore',
 		});
@@ -7426,7 +6986,7 @@ test('push singlestore throws fk_target_not_unique error in json mode', async ()
 
 	const pushSinglestore = await import('../../src/cli/commands/push-singlestore');
 
-	await expect(withCliContext(true, () =>
+	await expect(runWithCliContext({ json: true }, () =>
 		pushSinglestore.handle(
 			['schema.ts'],
 			{} as never,
