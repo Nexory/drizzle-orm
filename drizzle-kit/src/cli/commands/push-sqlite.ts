@@ -14,7 +14,7 @@ import { highlightSQL } from '../highlighter';
 import type { HintsHandler } from '../hints';
 import { resolver } from '../prompts';
 import { Select } from '../selector-ui';
-import type { EntitiesFilterConfig } from '../validations/cli';
+import type { EntitiesFilterConfig } from '../validations/common';
 import type { SqliteCredentials } from '../validations/sqlite';
 import { explain as explainView, explainJsonOutput, humanLog, ProgressView, sqliteSchemaError } from '../views';
 

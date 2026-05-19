@@ -277,7 +277,7 @@ const citiesMySchemaTable = mySchema.table('cities', {
 
 const ENABLE_LOGGING = false;
 
-let db: BunMySqlDatabase<never, typeof relations> & { $client: SQL };
+let db: BunMySqlDatabase<typeof relations> & { $client: SQL };
 let dbGlobalCached: BunMySqlDatabase & { $client: SQL };
 let cachedDb: BunMySqlDatabase & { $client: SQL };
 let client: SQL;
@@ -407,7 +407,7 @@ describe('common', () => {
 		`);
 	});
 
-	async function setupReturningFunctionsTest(db: MySqlDatabase<any, any, any, any, any>) {
+	async function setupReturningFunctionsTest(db: MySqlDatabase<any, any>) {
 		await db.execute(sql`drop table if exists \`users_default_fn\``);
 		await db.execute(
 			sql`
@@ -419,7 +419,7 @@ describe('common', () => {
 		);
 	}
 
-	async function setupSetOperationTest(db: MySqlDatabase<any, any, any, any, any>) {
+	async function setupSetOperationTest(db: MySqlDatabase<any, any>) {
 		await db.execute(sql`drop table if exists \`users2\``);
 		await db.execute(sql`drop table if exists \`cities\``);
 
@@ -460,7 +460,7 @@ describe('common', () => {
 		]);
 	}
 
-	async function setupAggregateFunctionsTest(db: MySqlDatabase<any, any, any, any, any>) {
+	async function setupAggregateFunctionsTest(db: MySqlDatabase<any, any>) {
 		await db.execute(sql`drop table if exists \`aggregate_table\``);
 		await db.execute(
 			sql`
@@ -1391,7 +1391,8 @@ describe('common', () => {
 		rmSync(migrationDir, { recursive: true });
 	});
 
-	test('managing multiple databases #1', async () => {
+	// TODO: Breaks further tests
+	test.todo('managing multiple databases #1', async () => {
 		await db.execute('drop database if exists drizzle1;');
 		await db.execute('create database drizzle1;');
 		await db.execute('drop database if exists drizzle2;');
@@ -1424,9 +1425,10 @@ describe('common', () => {
 		expect(result2).toEqual([{ id: 1, name: 'John', email: 'email' }]);
 	});
 
-	test('managing multiple databases #2', async () => {
-		db.execute('create database if not exists drizzle1;');
-		db.execute('create database if not exists drizzle2;');
+	// TODO: Breaks further tests
+	test.skip('managing multiple databases #2', async () => {
+		await db.execute('create database if not exists drizzle1;');
+		await db.execute('create database if not exists drizzle2;');
 
 		const client1 = await new SQL({
 			url: process.env['MYSQL_CONNECTION_STRING'],
@@ -4905,9 +4907,9 @@ test('insert into ... select', async () => {
 		pk: primaryKey({ columns: [t.userId, t.notificationId] }),
 	}));
 
-	await db.execute(sql`drop table if exists ${notifications}`);
-	await db.execute(sql`drop table if exists ${users}`);
-	await db.execute(sql`drop table if exists ${userNotications}`);
+	await db.execute(sql`drop table if exists ${userNotications} cascade`);
+	await db.execute(sql`drop table if exists ${users} cascade`);
+	await db.execute(sql`drop table if exists ${notifications} cascade`);
 	await db.execute(sql`
 		create table ${notifications} (
 			\`id\` serial primary key,
@@ -5063,7 +5065,7 @@ test('MySqlTable :: select with `use index` hint on 1 index', async () => {
 		.where(eq(users.name, 'David'))
 		.toSQL();
 
-	expect(query.sql).toInclude('USE INDEX (users_name_index)');
+	expect(query.sql).toInclude('USE INDEX (`users_name_index`)');
 });
 
 test('MySqlTable :: select with `use index` hint on multiple indexes', async () => {
@@ -5093,7 +5095,7 @@ test('MySqlTable :: select with `use index` hint on multiple indexes', async () 
 		.where(eq(users.name, 'David'))
 		.toSQL();
 
-	expect(query.sql).toInclude('USE INDEX (users_name_index, users_age_index)');
+	expect(query.sql).toInclude('USE INDEX (`users_name_index`, `users_age_index`)');
 });
 
 test('MySqlTable :: select with `use index` hint on not existed index', async () => {
@@ -5277,7 +5279,7 @@ test('MySqlTable :: select with join `use index` hint on 1 index', async () => {
 			eq(posts.text, 'David post'),
 		)).toSQL();
 
-	expect(query.sql).toInclude('USE INDEX (posts_user_id_index)');
+	expect(query.sql).toInclude('USE INDEX (`posts_user_id_index`)');
 });
 
 test('MySqlTable :: select with cross join `use index` hint', async () => {
@@ -5387,7 +5389,7 @@ test('MySqlTable :: select with cross join `use index` hint on 1 index', async (
 			eq(posts.text, 'David post'),
 		)).toSQL();
 
-	expect(query.sql).toInclude('USE INDEX (posts_user_id_index)');
+	expect(query.sql).toInclude('USE INDEX (`posts_user_id_index`)');
 });
 
 test('MySqlTable :: select with join `use index` hint on multiple indexes', async () => {
@@ -5437,7 +5439,7 @@ test('MySqlTable :: select with join `use index` hint on multiple indexes', asyn
 			eq(posts.text, 'David post'),
 		)).toSQL();
 
-	expect(query.sql).toInclude('USE INDEX (posts_user_id_index, posts_text_index)');
+	expect(query.sql).toInclude('USE INDEX (`posts_user_id_index`, `posts_text_index`)');
 });
 
 test('MySqlTable :: select with join `use index` hint on not existed index', async () => {

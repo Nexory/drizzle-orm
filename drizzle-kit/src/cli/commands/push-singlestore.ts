@@ -10,7 +10,7 @@ import { highlightSQL } from '../highlighter';
 import type { HintsHandler } from '../hints';
 import { resolver } from '../prompts';
 import { Select } from '../selector-ui';
-import type { EntitiesFilterConfig } from '../validations/cli';
+import type { EntitiesFilterConfig } from '../validations/common';
 import type { MysqlCredentials } from '../validations/mysql';
 import { explain as explainView, explainJsonOutput, humanLog, mysqlSchemaError, ProgressView } from '../views';
 import { suggestions } from './push-mysql';

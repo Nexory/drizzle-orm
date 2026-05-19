@@ -42,7 +42,7 @@ import { ddlToTypeScript } from 'src/dialects/cockroach/typescript';
 import { DB } from 'src/utils';
 import 'zx/globals';
 import { randomUUID } from 'crypto';
-import { EntitiesFilter, EntitiesFilterConfig } from 'src/cli/validations/cli';
+import { EntitiesFilter, EntitiesFilterConfig } from 'src/cli/validations/common';
 import { hash } from 'src/dialects/common';
 import { extractCrdbExisting } from 'src/dialects/drizzle';
 import { prepareEntityFilter } from 'src/dialects/pull-utils';

@@ -26,7 +26,7 @@ import { highlightSQL } from '../highlighter';
 import type { HintsHandler } from '../hints';
 import { resolver } from '../prompts';
 import { Select } from '../selector-ui';
-import type { EntitiesFilterConfig } from '../validations/cli';
+import type { EntitiesFilterConfig } from '../validations/common';
 import type { MssqlCredentials } from '../validations/mssql';
 import { explain as explainView, explainJsonOutput, humanLog, mssqlSchemaError, ProgressView } from '../views';
 
