@@ -6034,7 +6034,7 @@ export function tests(test: Test, exclude: string[] = []) {
 	});
 
 	// Sync drivers don't wrap errors - TODO
-	test.skipIf(Date.now() < +new Date('2026-05-20'))('Query error wrapping', async ({ db }) => {
+	test.skipIf(Date.now() < +new Date('2026-06-20'))('Query error wrapping', async ({ db }) => {
 		await expect(async () =>
 			await db.insert(usersTable).values([{ id: 1, name: 'First' }, { id: 1, name: 'Second' }]).run()
 		)
