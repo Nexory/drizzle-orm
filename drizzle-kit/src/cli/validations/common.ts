@@ -1,8 +1,8 @@
 import chalk from 'chalk';
 import type { UnionToIntersection } from 'hono/utils/types';
-import { dialect } from 'src/utils/schemaValidator';
 import type { TypeOf } from 'zod';
 import { any, boolean, coerce, enum as enum_, literal, object, string, union } from 'zod';
+import { dialect } from '../../utils/schemaValidator';
 import { AmbiguousParamsCliError } from '../errors';
 import { outputs } from './outputs';
 

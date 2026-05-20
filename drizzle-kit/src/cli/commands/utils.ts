@@ -167,7 +167,8 @@ export const prepareExportConfig = async (
 		? await drizzleConfigFromFile(options.config, true)
 		: options;
 
-	const { schema, dialect, sql } = config;
+	const { schema, dialect } = config;
+	const sql = options.sql ?? (config as { sql?: boolean }).sql ?? true;
 
 	if (!schema || !dialect) {
 		throw new RequiredParamsCliError(
@@ -183,7 +184,7 @@ export const prepareExportConfig = async (
 	const fileNames = prepareFilenames(schema);
 	return {
 		dialect: dialect,
-		sql: sql ?? true,
+		sql: sql,
 		filenames: fileNames,
 	};
 };

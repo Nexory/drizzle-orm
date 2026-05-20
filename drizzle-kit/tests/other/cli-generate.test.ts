@@ -5,6 +5,8 @@ import { afterEach, assert, expect, test, vi } from 'vitest';
 import { GenerateConfig } from '../../src/cli/commands/utils';
 import { HintsHandler } from '../../src/cli/hints';
 import { generate } from '../../src/cli/schema';
+import { wrapParam } from '../../src/cli/validations/common';
+import { error } from '../../src/cli/views';
 import { createConfig } from './utils';
 
 const originalPrefix = process.env.TEST_CONFIG_PATH_PREFIX;
@@ -427,8 +429,6 @@ test('validate config #2', async (t) => {
 });
 
 test('validate config #3', async (t) => {
-	const spy = vi.spyOn(console, 'log');
-
 	const { path, name } = createConfig(
 		{ dialect: 'postgresql', driver: 'aws-data-api', out: 'test' },
 		prefix,
@@ -439,30 +439,18 @@ test('validate config #3', async (t) => {
 	unlinkSync(path);
 
 	expect(res.type).toBe('error');
-
-	// first call
-	expect(spy).toHaveBeenNthCalledWith(1, `Reading config file '${path}'`);
-	// second call
-	// we need to check second call
-	expect(spy).toHaveBeenNthCalledWith(
-		2,
-		`Error  Please provide required params:
-    [✓] dialect: 'postgresql'
-    [x] schema: undefined`,
+	if (res.type !== 'error') return;
+	expect((res.error as Error).message).toBe(
+		[
+			error('Please provide required params:'),
+			wrapParam('schema', undefined),
+			wrapParam('dialect', 'postgresql'),
+			wrapParam('out', 'test', true),
+		].join('\n'),
 	);
-
-	let error: any = res.type === 'error' ? res.error : undefined;
-	expect(error).toBeDefined();
-	expect(error).toBeInstanceOf(Error);
-	expect(error.message).toBe('process.exit unexpectedly called with "1"');
-
-	spy.mockRestore();
 });
 
 test('validate config #4', async (t) => {
-	const spyLog = vi.spyOn(console, 'log');
-	const spyError = vi.spyOn(console, 'error');
-
 	const { path, name } = createConfig(
 		// @ts-expect-error
 		{ dialect: 1, schema: 'path-to-schema' },
@@ -473,21 +461,10 @@ test('validate config #4', async (t) => {
 
 	unlinkSync(path);
 
-	// wrong dialect data type
+	// wrong dialect data type → ConfigValidationCliError
 	expect(res.type).toBe('error');
-
-	expect(spyLog).toHaveBeenNthCalledWith(1, `Reading config file '${path}'`);
-	expect(spyLog).toHaveBeenCalledTimes(1);
-
-	expect(spyError).toHaveBeenCalledWith(expect.objectContaining({ name: 'ZodError' }));
-
-	let error: any = res.type === 'error' ? res.error : undefined;
-	expect(error).toBeDefined();
-	expect(error).toBeInstanceOf(Error);
-	expect(error.message).toBe('process.exit unexpectedly called with "1"');
-
-	spyLog.mockRestore();
-	spyError.mockRestore();
+	if (res.type !== 'error') return;
+	expect((res.error as Error).name).toBe('ConfigValidationCliError');
 });
 
 test('validate config #5', async (t) => {
