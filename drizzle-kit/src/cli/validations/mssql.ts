@@ -27,14 +27,27 @@ export const printConfigConnectionIssues = (
 	options: Record<string, unknown>,
 	_command?: 'generate' | 'migrate' | 'push' | 'pull' | 'studio',
 ): never => {
+	if ('url' in options) {
+		let text = `Please provide required params for MsSQL driver:\n`;
+		throw new ConfigConnectionCliError(
+			'mssql',
+			['url'],
+			[
+				error(text),
+				wrapParam('url', options.url, false, 'url'),
+			].join('\n'),
+			_command,
+		);
+	}
+
 	if (
-		'port' in options || 'user' in options || 'password' in options || 'database' in options || 'server' in options
+		'server' in options || 'database' in options || 'port' in options || 'user' in options || 'password' in options
 		|| 'options' in options
 	) {
 		let text = `Please provide required params for MsSQL driver:\n`;
 		throw new ConfigConnectionCliError(
 			'mssql',
-			['server', 'port', 'user', 'password', 'database'],
+			['server', 'user', 'password', 'database'],
 			[
 				error(text),
 				wrapParam('server', options.server),
@@ -48,14 +61,10 @@ export const printConfigConnectionIssues = (
 		);
 	}
 
-	let text = `Please provide required params for MsSQL driver:\n`;
 	throw new ConfigConnectionCliError(
 		'mssql',
-		['url'],
-		[
-			error(text),
-			wrapParam('url', options.url, false, 'url'),
-		].join('\n'),
+		['url', 'server', 'database'],
+		error(`Either connection "url" or "server", "user", "password" are required for MsSQL database connection`),
 		_command,
 	);
 };
