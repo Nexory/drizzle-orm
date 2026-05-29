@@ -8,7 +8,7 @@ import { ddlDiff } from '../../dialects/sqlite/diff';
 import { fromDrizzleSchema, prepareFromSchemaFiles } from '../../dialects/sqlite/drizzle';
 import type { JsonStatement } from '../../dialects/sqlite/statements';
 import type { SQLiteClient } from '../../utils';
-import { isJsonMode } from '../context';
+import { outputFormat } from '../context';
 import { CommandOutputCliError } from '../errors';
 import { highlightSQL } from '../highlighter';
 import type { HintsHandler } from '../hints';
@@ -33,7 +33,7 @@ export const handle = async (
 	dialect: 'sqlite' | 'turso',
 	hints: HintsHandler,
 ) => {
-	const json = isJsonMode();
+	const json = outputFormat() === 'json';
 
 	const { introspect: sqliteIntrospect } = await import('./pull-sqlite');
 
@@ -125,7 +125,7 @@ export const suggestions = async (
 	jsonStatements: JsonStatement[],
 	hints: HintsHandler,
 ) => {
-	const json = isJsonMode();
+	const json = outputFormat() === 'json';
 	const grouped: { hint: string; statement?: string }[] = [];
 
 	// TODO: generate truncations/recreates ??

@@ -16,7 +16,7 @@ import { fromDrizzleSchema, prepareFromSchemaFiles } from '../../dialects/mssql/
 import { prepareSnapshot } from '../../dialects/mssql/serializer';
 import type { JsonStatement } from '../../dialects/mssql/statements';
 import { prepareOutFolder } from '../../utils/utils-node';
-import { isJsonMode } from '../context';
+import { outputFormat } from '../context';
 import { CommandOutputCliError } from '../errors';
 import { resolver } from '../prompts';
 import { withStyle } from '../validations/outputs';
@@ -26,7 +26,7 @@ import type { ExportConfig, GenerateConfig } from './utils';
 
 export const handle = async (config: GenerateConfig) => {
 	const { out: outFolder, filenames } = config;
-	const json = isJsonMode();
+	const json = outputFormat() === 'json';
 	const { snapshots } = prepareOutFolder(outFolder);
 	const { ddlCur, ddlPrev, snapshot, custom } = await prepareSnapshot(snapshots, filenames);
 
@@ -60,7 +60,7 @@ export const handle = async (config: GenerateConfig) => {
 		'default',
 	);
 
-	if (json && config.hints.hasMissingHints()) {
+	if (config.hints.hasMissingHints()) {
 		return config.hints.toResponse();
 	}
 

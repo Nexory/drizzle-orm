@@ -4,7 +4,7 @@ import { ddlDiff, ddlDiffDry } from '../../dialects/singlestore/diff';
 import { fromDrizzleSchema, prepareFromSchemaFiles } from '../../dialects/singlestore/drizzle';
 import { prepareSnapshot } from '../../dialects/singlestore/serializer';
 import { prepareOutFolder } from '../../utils/utils-node';
-import { isJsonMode } from '../context';
+import { outputFormat } from '../context';
 import { resolver } from '../prompts';
 import { explain, explainJsonOutput, humanLog } from '../views';
 import { writeResult } from './generate-common';
@@ -12,7 +12,7 @@ import type { ExportConfig, GenerateConfig } from './utils';
 
 export const handle = async (config: GenerateConfig) => {
 	const { out: outFolder, filenames } = config;
-	const json = isJsonMode();
+	const json = outputFormat() === 'json';
 	const { snapshots } = prepareOutFolder(outFolder);
 	const { ddlCur, ddlPrev, snapshot, custom } = await prepareSnapshot(snapshots, filenames);
 
@@ -39,7 +39,7 @@ export const handle = async (config: GenerateConfig) => {
 		'default',
 	);
 
-	if (json && config.hints.hasMissingHints()) {
+	if (config.hints.hasMissingHints()) {
 		return config.hints.toResponse();
 	}
 

@@ -21,7 +21,7 @@ import type { SchemaError as SqliteSchemaError } from '../dialects/sqlite/ddl';
 import type { JsonStatement as StatementSqlite } from '../dialects/sqlite/statements';
 import type { Named, NamedWithSchema } from '../dialects/utils';
 import { assertUnreachable } from '../utils';
-import { isJsonMode } from './context';
+import { outputFormat } from './context';
 import { highlightSQL } from './highlighter';
 import { withStyle } from './validations/outputs';
 
@@ -36,8 +36,13 @@ export const err = (msg: string) => {
 export const errText = (msg: string) => `${chalk.bold.red('Error')} ${msg}`;
 
 export const humanLog = (...args: Parameters<typeof console.log>) => {
-	if (isJsonMode()) return;
+	if (outputFormat() === 'json') return;
 	console.log(...args);
+};
+
+export const humanError = (...args: Parameters<typeof console.error>) => {
+	if (outputFormat() === 'json') return;
+	console.error(...args);
 };
 
 export const humanizeKind = (kind: string): string => kind.replaceAll('_', ' ');
@@ -1819,7 +1824,7 @@ export class ProgressView extends TaskView {
 	}
 
 	render(status: 'pending' | 'done' | 'rejected', error?: Error): string {
-		if (isJsonMode()) {
+		if (outputFormat() === 'json') {
 			return '';
 		}
 

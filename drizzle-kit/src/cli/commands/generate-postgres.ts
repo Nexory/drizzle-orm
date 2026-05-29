@@ -19,7 +19,7 @@ import { ddlDiff, ddlDiffDry } from '../../dialects/postgres/diff';
 import { fromDrizzleSchema, prepareFromSchemaFiles } from '../../dialects/postgres/drizzle';
 import { prepareSnapshot } from '../../dialects/postgres/serializer';
 import { prepareOutFolder } from '../../utils/utils-node';
-import { isJsonMode } from '../context';
+import { outputFormat } from '../context';
 import { CommandOutputCliError } from '../errors';
 import { resolver } from '../prompts';
 import { explain, explainJsonOutput, humanLog, postgresSchemaError, postgresSchemaWarning } from '../views';
@@ -32,7 +32,7 @@ export const handle = async (
 	checkResult?: CheckHandlerResult,
 ) => {
 	const { out: outFolder, filenames } = config;
-	const json = isJsonMode();
+	const json = outputFormat() === 'json';
 
 	const { snapshots } = prepareOutFolder(outFolder);
 	const { ddlCur, ddlPrev, snapshot, custom } = await prepareSnapshot(
@@ -75,7 +75,7 @@ export const handle = async (
 		'default',
 	);
 
-	if (json && config.hints.hasMissingHints()) {
+	if (config.hints.hasMissingHints()) {
 		return config.hints.toResponse();
 	}
 

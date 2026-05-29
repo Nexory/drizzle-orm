@@ -28,8 +28,10 @@ import {
 	preparePushConfig,
 	prepareStudioConfig,
 } from './commands/utils';
-import type { GenerateOptions, PushOptions } from './contract';
+import { outputFormat, setCliContext } from './context';
+import type { GenerateOptionsInput, PushOptionsInput } from './contract';
 import { OrmDriverVersionCliError, UnsupportedCommandCliError } from './errors';
+import { formatMissingHintsText } from './missing-hints-report';
 import { assertOrmCoreVersion, assertPackages, assertStudioNodeVersion, ormVersionGt } from './utils';
 import { assertCollisions, drivers } from './validations/common';
 import type { LibSQLCredentials } from './validations/libsql';
@@ -55,15 +57,17 @@ export const statusToExitCode = (status: EnvelopeStatus): 0 | 1 | 2 => {
 	}
 };
 
-export const prepareGenerate = async (opts: GenerateOptions) => {
-	const optsWithJson = { ...opts, json: true };
+export const prepareGenerate = async (opts: GenerateOptionsInput) => {
+	const output = opts.output ?? 'text';
+	const interactive = output === 'text' && !!process.stdin.isTTY;
+	setCliContext({ output, interactive });
 	const from = assertCollisions(
 		'generate',
-		optsWithJson,
-		['name', 'custom', 'ignoreConflicts', 'explain', 'json', 'hints', 'hintsFile'],
+		opts,
+		['name', 'custom', 'ignoreConflicts', 'explain', 'output', 'hints', 'hintsFile'],
 		['driver', 'breakpoints', 'schema', 'out', 'dialect'],
 	);
-	return prepareGenerateConfig(optsWithJson as Parameters<typeof prepareGenerateConfig>[0], from);
+	return prepareGenerateConfig(opts as Parameters<typeof prepareGenerateConfig>[0], from);
 };
 
 export const runGenerate = async (
@@ -114,12 +118,14 @@ export const runGenerate = async (
 	assertUnreachable(dialect);
 };
 
-export const preparePush = async (opts: PushOptions) => {
-	const optsWithJson = { ...opts, json: true };
+export const preparePush = async (opts: PushOptionsInput) => {
+	const output = opts.output ?? 'text';
+	const interactive = output === 'text' && !!process.stdin.isTTY;
+	setCliContext({ output, interactive });
 	const from = assertCollisions(
 		'push',
-		optsWithJson,
-		['force', 'verbose', 'strict', 'explain', 'json', 'hints', 'hintsFile'],
+		opts,
+		['force', 'verbose', 'strict', 'explain', 'output', 'hints', 'hintsFile'],
 		[
 			'schema',
 			'dialect',
@@ -139,7 +145,7 @@ export const preparePush = async (opts: PushOptions) => {
 		],
 	);
 
-	if (typeof optsWithJson.strict !== 'undefined') {
+	if (typeof opts.strict !== 'undefined') {
 		throw new UnsupportedCommandCliError(
 			'push',
 			withStyle.fullWarning("⚠️ Deprecated: Do not use 'strict' flag. Use 'explain' instead"),
@@ -147,7 +153,7 @@ export const preparePush = async (opts: PushOptions) => {
 		);
 	}
 
-	return preparePushConfig(optsWithJson, from);
+	return preparePushConfig(opts, from);
 };
 
 export const runPush = async (
@@ -287,9 +293,9 @@ const optionDriver = string()
 const optionIgnoreConflicts = boolean('ignore-conflicts').desc(
 	'Skip commutativity conflict checks',
 );
-const optionHints = string().desc('Inline JSON array of hints for --json mode');
+const optionHints = string().desc('Inline JSON array of hints');
 const optionHintsFile = string('hints-file').desc('Path to a JSON file containing a hints array');
-const optionJson = boolean('json').desc('Output as JSON').default(false);
+const optionOutput = string('output').enum('text', 'json').desc('Output format').default('text');
 
 export const generateOptions = {
 	config: optionConfig,
@@ -306,7 +312,7 @@ export const generateOptions = {
 	explain: boolean()
 		.desc('Print the planned SQL changes (dry run)')
 		.default(false),
-	json: optionJson,
+	output: optionOutput,
 	hints: optionHints,
 	hintsFile: optionHintsFile,
 } as const satisfies Record<string, GenericBuilderInternals>;
@@ -317,7 +323,8 @@ export const generate = command({
 	transform: prepareGenerate,
 	handler: async (cfg) => {
 		const env = await runGenerate(cfg);
-		process.stdout.write(JSON.stringify(env) + '\n');
+		if (outputFormat() === 'json') process.stdout.write(JSON.stringify(env) + '\n');
+		else if (env.status === 'missing_hints') process.stdout.write(formatMissingHintsText(env));
 		process.exit(statusToExitCode(env.status));
 	},
 });
@@ -487,7 +494,7 @@ export const pushOptions = {
 			'Auto-approve all data loss statements. Note: Data loss statements may truncate your tables and data',
 		)
 		.default(false),
-	json: optionJson,
+	output: optionOutput,
 	explain: boolean()
 		.desc('Print the planned SQL changes (dry run)')
 		.default(false),
@@ -501,7 +508,8 @@ export const push = command({
 	transform: preparePush,
 	handler: async (cfg) => {
 		const env = await runPush(cfg);
-		process.stdout.write(JSON.stringify(env) + '\n');
+		if (outputFormat() === 'json') process.stdout.write(JSON.stringify(env) + '\n');
+		else if (env.status === 'missing_hints') process.stdout.write(formatMissingHintsText(env));
 		process.exit(statusToExitCode(env.status));
 	},
 });
